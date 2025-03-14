@@ -3,7 +3,7 @@
 #include <time.h>
 
 #define BLOCK_SIZE 32
-#define N 100000000
+#define N 1000000000
 #define RADIX 2
 
 double getTimeMicroseconds() {
@@ -14,7 +14,7 @@ double getTimeMicroseconds() {
 
 void init_array(int* arr, int n) {
     for (int i = 0; i < n; i++) {
-        arr[i] = rand() % 100000000;
+        arr[i] = rand();
     }
 }
 
@@ -104,7 +104,6 @@ int main() {
 
         cudaMemcpy(d_arr, d_res, N * sizeof(int), cudaMemcpyDeviceToDevice);
     }
-
     double end = getTimeMicroseconds();
 
     cudaMemcpy(h_res, d_res, N * sizeof(int), cudaMemcpyDeviceToHost);
