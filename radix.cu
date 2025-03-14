@@ -1,13 +1,20 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <time.h>
 
 #define BLOCK_SIZE 32
-#define N 73
+#define N 100000000
 #define RADIX 2
+
+double getTimeMicroseconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
 
 void init_array(int* arr, int n) {
     for (int i = 0; i < n; i++) {
-        arr[i] = rand() % 100;
+        arr[i] = rand() % 100000000;
     }
 }
 
@@ -80,7 +87,8 @@ int main() {
 
     cudaMemcpy(d_arr, h_arr, N * sizeof(int), cudaMemcpyHostToDevice);
 
-    for (int i = 0; i < 7; i++) {
+    double start = getTimeMicroseconds();
+    for (int i = 0; i < 16; i++) {
         compute_global_count<<<gridDim, blockDim>>>(d_arr, d_global_count, N, i);
         cudaDeviceSynchronize();
         cudaMemcpy(h_global_count, d_global_count, gridDim.x * pow(RADIX, 2) * sizeof(int), cudaMemcpyDeviceToHost);
@@ -90,11 +98,6 @@ int main() {
             h_global_offset[j] = h_global_offset[j - 1] + h_global_count[j - 1];
         }
 
-        printf("Global offset: \n");
-        for(int j = 0; j < 4 * gridDim.x; j++) {
-            printf("%d ", h_global_offset[j]);
-        }
-
         cudaMemcpy(d_global_offset, h_global_offset, gridDim.x * pow(RADIX, 2) * sizeof(int), cudaMemcpyHostToDevice);
         radix_sort<<<gridDim, blockDim>>>(d_arr, d_res, d_global_offset, N, i);
         cudaDeviceSynchronize();
@@ -102,15 +105,16 @@ int main() {
         cudaMemcpy(d_arr, d_res, N * sizeof(int), cudaMemcpyDeviceToDevice);
     }
 
+    double end = getTimeMicroseconds();
+
     cudaMemcpy(h_res, d_res, N * sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_global_count, d_global_count, gridDim.x * pow(RADIX, 2) * sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_global_offset, d_global_offset, gridDim.x * pow(RADIX, 2) * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
 
-    printf("\nSorted array: \n");
-    for (int i = 0; i < N; i++) {
-        printf("%d \n", h_res[i]);
-    }
+    //printf("\nSorted array: \n");
+    //for (int i = 0; i < N; i++) {
+    //    printf("%d \n", h_res[i]);
+    //}
 
     printf("\n\n");
     for (int i = 0; i < N-1; i++) {
@@ -121,7 +125,8 @@ int main() {
     }
     printf("SUCCESS");
     printf("\n\n");
-
+    printf("Time takes: %lf microseconds", end - start);
+    printf("\n\n");
 
     free(h_arr);
     free(h_res);
