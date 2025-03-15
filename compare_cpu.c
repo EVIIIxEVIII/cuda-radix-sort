@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <malloc.h>
 
-#define N 1000000000
+#define N 100000000
 
 void init_array(int* arr, int n) {
     for (int i = 0; i < n; i++) {

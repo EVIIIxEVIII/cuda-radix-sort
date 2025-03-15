@@ -5,7 +5,7 @@
 #include <vector>
 #include <chrono>
 
-#define N 100000000  // 1 billion elements
+#define N 100000000
 
 int main() {
     // Allocate host and device memory
