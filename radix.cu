@@ -3,8 +3,18 @@
 #include <time.h>
 
 #define BLOCK_SIZE 32
-#define N 100000000
+#define N 134217728
 #define RADIX 2
+
+#define CHECK_CUDA(call)                                                      \
+    {                                                                         \
+        cudaError_t err = call;                                               \
+        if (err != cudaSuccess) {                                             \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,  \
+                    cudaGetErrorString(err));                                  \
+            exit(EXIT_FAILURE);                                               \
+        }                                                                     \
+    }
 
 double getTimeMicroseconds() {
     struct timespec ts;
@@ -20,41 +30,37 @@ void init_array(int* arr, int n) {
 
 __global__ void compute_global_count(int* arr, int* global_count, int n, int iter) {
     __shared__ int local_count_map[4];
-    __shared__ int local_offset_map[4];
-    __shared__ int digits[BLOCK_SIZE];
-    __shared__ int scan_temp[4]; // Added for parallel scan
 
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
 
-    if (tid < 4) {
-        local_count_map[tid] = 0;
-        local_offset_map[tid] = 0;
-        scan_temp[tid] = 0;
-    }
+    if (tid < 4) local_count_map[tid] = 0;
+
     __syncthreads();
 
-    if (gid < n) {
-        digits[tid] = (arr[gid] >> (2 * iter)) & 3;
-        atomicAdd(&local_count_map[digits[tid]], 1);
-    }
-    __syncthreads();
-
-    if (tid < 4) {
-        scan_temp[tid] = local_count_map[tid];
-    }
-    __syncthreads();
-
-    for (int d = 1; d < 4; d *= 2) {
-        if (tid < 4 && tid >= d) {
-            scan_temp[tid] += scan_temp[tid - d];
-        }
-        __syncthreads();
+    int digit = 0;
+    int active = (gid < n);
+    if (active) {
+        digit = (arr[gid] >> (2 * iter)) & 3;
     }
 
-    if (tid < 4) {
-        local_offset_map[tid] = (tid == 0) ? 0 : scan_temp[tid - 1];
+    int mask_0 = __ballot_sync(0xFFFFFFFF, digit == 0);
+    int mask_1 = __ballot_sync(0xFFFFFFFF, digit == 1);
+    int mask_2 = __ballot_sync(0xFFFFFFFF, digit == 2);
+    int mask_3 = __ballot_sync(0xFFFFFFFF, digit == 3);
+
+    int count_0 = __popc(mask_0);
+    int count_1 = __popc(mask_1);
+    int count_2 = __popc(mask_2);
+    int count_3 = __popc(mask_3);
+
+    if (tid == 0) {
+        local_count_map[0] += count_0;
+        local_count_map[1] += count_1;
+        local_count_map[2] += count_2;
+        local_count_map[3] += count_3;
     }
+
     __syncthreads();
 
     if (tid < 4) {
@@ -88,6 +94,7 @@ __global__ void in_lane_scan(int* arr, int* in_lane_scans, int* sums, int n) {
             temp[tid] += val;
             __syncthreads();
         }
+
         local_offset[tid] = temp[tid];
     }
 
@@ -102,6 +109,11 @@ __global__ void in_lane_scan(int* arr, int* in_lane_scans, int* sums, int n) {
     }
 }
 
+__global__ void parallel_scan_sums(int* sums, int* temp, int sums_num) {
+
+
+}
+
 __global__ void in_lane_propagation(int* in_lane_scans, int* sums, int* res, int n) {
     const int bid = blockIdx.x;
     const int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -110,6 +122,7 @@ __global__ void in_lane_propagation(int* in_lane_scans, int* sums, int* res, int
         res[gid] = in_lane_scans[gid] + sums[bid];
     }
 }
+
 
 __global__ void radix_sort(int* arr, int* res, int* global_offset, int n, int iter) {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -169,48 +182,58 @@ int main() {
     double totalGc = 0;
     double totalIls = 0;
     double totalIlp = 0;
+    double totalCpu = 0;
     double totalRadix = 0;
 
-
+    cudaFree(0);
     double start = getTimeMicroseconds();
     for (int i = 0; i < 16; i++) {
         double gcStart = getTimeMicroseconds();
         compute_global_count<<<gridDim, blockDim>>>(d_arr, d_global_count, N, i);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         double gcEnd = getTimeMicroseconds();
 
         double ilsStart = getTimeMicroseconds();
         in_lane_scan<<<gridDimILS, blockDimILS>>>(d_global_count, d_in_lane_scans, d_sums, maps_size);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         double ilsEnd = getTimeMicroseconds();
-        cudaMemcpy(h_sums, d_sums, gridDim.x * sizeof(int), cudaMemcpyDeviceToHost);
 
+        double startCpu = getTimeMicroseconds();
+        cudaMemcpy(h_sums, d_sums, gridDim.x * sizeof(int), cudaMemcpyDeviceToHost);
         h_sums_offsets[0] = 0;
         for (int j = 1; j < gridDim.x; j++) {
             h_sums_offsets[j] = h_sums_offsets[j - 1] + h_sums[j - 1];
         }
-
         cudaMemcpy(d_sums, h_sums_offsets, gridDim.x * sizeof(int), cudaMemcpyHostToDevice);
+        double endCpu = getTimeMicroseconds();
 
         double ilpStart = getTimeMicroseconds();
         in_lane_propagation<<<gridDimILS, blockDimILS>>>(d_in_lane_scans, d_sums, d_global_offset, maps_size);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         double ilpEnd = getTimeMicroseconds();
 
         double radixStart = getTimeMicroseconds();
         radix_sort<<<gridDim, blockDim>>>(d_arr, d_res, d_global_offset, N, i);
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         double radixEnd = getTimeMicroseconds();
 
         cudaMemcpy(d_arr, d_res, N * sizeof(int), cudaMemcpyDeviceToDevice);
-        double end2 = getTimeMicroseconds();
 
         totalGc += (gcEnd - gcStart);
         totalIls += (ilsEnd - ilsStart);
         totalIlp += (ilpEnd - ilpStart);
+        totalCpu += (endCpu - startCpu);
         totalRadix += (radixEnd - radixStart);
     }
     double end = getTimeMicroseconds();
+
+    printf("\n\nTime taken (total): %lf microseconds\n\n", end - start);
+
+    printf("Time taken (gc)   : %lf microseconds\n", totalGc);
+    printf("Time taken (ils)  : %lf microseconds\n", totalIls);
+    printf("Time taken (ilp)  : %lf microseconds\n", totalIlp);
+    printf("Time taken (cpu)  : %lf microseconds\n", totalCpu);
+    printf("Time taken (radix): %lf microseconds\n", totalRadix);
 
     cudaMemcpy(h_res, d_res, N * sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_global_count, d_global_count, maps_size * sizeof(int), cudaMemcpyDeviceToHost);
@@ -230,14 +253,7 @@ int main() {
         }
     }
 
-    printf("SUCCESS");
-    printf("\n\n");
-    printf("Time taken (gc)   : %lf microseconds\n", totalGc);
-    printf("Time taken (ils)  : %lf microseconds\n", totalIls);
-    printf("Time taken (ilp)  : %lf microseconds\n", totalIlp);
-    printf("Time taken (radix): %lf microseconds\n", totalRadix);
-    printf("Time taken (total): %lf microseconds\n", end - start);
-    printf("\n\n");
+    printf("\n\nTEST PASSED! SORTING PERFORMED CORRECTLY!\n\n");
 
     free(h_arr);
     free(h_res);
